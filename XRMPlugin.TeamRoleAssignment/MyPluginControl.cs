@@ -78,6 +78,10 @@ namespace XRMPlugin.TeamManager
             LoadTeams();
             LoadRoles();
             LoadSavedViews();
+            if (!string.IsNullOrEmpty(textBoxFileName.Text))
+            {
+                PopulateUserList(UserQuery);
+            }
         }
 
         private void ResetForm(Control excludedControl)
@@ -129,7 +133,7 @@ namespace XRMPlugin.TeamManager
                             foreach (var item in listBoxTeams.Items.Cast<Team>().Where(t => selectedTeams.Contains(t.Name)).ToArray())
                             {
                                 listBoxTeams.SelectedItems.Add(item);
-                            } 
+                            }
                         }
                     }
                 }
@@ -216,12 +220,12 @@ namespace XRMPlugin.TeamManager
 
         private void buttonBrowse_Click(object sender, EventArgs e)
         {
-            var openFileDialog = new OpenFileDialog
-            {
-                Title = "Select User List",
-                Filter = "csv files (*.csv)|*.csv|txt files (*.txt)|*.txt|Excel files (*.xls; *.xlsx)|*.xls;*.xlsx",
-                RestoreDirectory = true
-            };
+            //var openFileDialog = new OpenFileDialog
+            //{
+            //    Title = "Select User List",
+            //    Filter = "All supported files|*.csv;*.txt;*.xls;*.xlsx|csv files (*.csv)|*.csv|txt files (*.txt)|*.txt|Excel files (*.xls; *.xlsx)|*.xls;*.xlsx",
+            //    RestoreDirectory = true
+            //};
 
             if (openFileDialog.ShowDialog() == DialogResult.OK)
             {
@@ -274,10 +278,18 @@ namespace XRMPlugin.TeamManager
                     foreach (var file in files.Where(f => excelExtensions.Contains(Path.GetExtension(f))))
                     {
                         var xlApp = new Excel.Application();
-                        var xlWb = xlApp.Workbooks.Open(file);
-                        var xlWs = (Excel._Worksheet)xlWb.Worksheets.Item[1];
+                        var xlWorkbook = xlApp.Workbooks.Open(file);
+                        var xlWorksheet = (Excel.Worksheet)xlWorkbook.Worksheets[1];
+                        var xlRange = xlWorksheet.UsedRange.Columns[1];
 
-                        foreach (object cell in (Array)xlWs.UsedRange.Columns[1].Value)
+                        if (xlWorksheet.ListObjects.Count > 0)
+                        {
+                            var xlListObject = xlWorksheet.ListObjects[1];
+                            var xlListColumn = xlListObject.ListColumns.Cast<Excel.ListColumn>().FirstOrDefault(lc => lc.Name == "User Name");
+                            if (xlListColumn != null) xlRange = xlListColumn.Range;
+                        }
+
+                        foreach (object cell in (Array)xlRange.Value)
                         {
                             userList.Add(cell.ToString());
                         }
@@ -324,7 +336,7 @@ namespace XRMPlugin.TeamManager
             }
             else
             {
-                ToggleEnabled(sender, e);
+                ToggleEnabled();
             }
         }
 
@@ -368,14 +380,14 @@ namespace XRMPlugin.TeamManager
             }
             else
             {
-                ToggleEnabled(sender, e);
+                ToggleEnabled();
             }
         }
 
         private void PopulateUserList(QueryExpression userQuery)
         {
             listViewUsers.Items.Clear();
-            listViewUsers.Enabled = false;
+            ToggleEnabled();
 
             if (userQuery != null)
             {
@@ -414,7 +426,7 @@ namespace XRMPlugin.TeamManager
                                     ForeColor = user.Disabled ? Color.Gray : ForeColor
                                 });
                             }
-                            listViewUsers.Enabled = true;
+                            ToggleEnabled();
                         }
                     }
                 });
@@ -443,16 +455,15 @@ namespace XRMPlugin.TeamManager
             radioButtonAdd.Text = e.TabPage.Text.Replace("Select", "Add to");
             radioButtonRemove.Text = e.TabPage.Text.Replace("Select", "Remove from");
 
-            ToggleEnabled(sender, e);
+            ToggleEnabled();
         }
 
-        private void ToggleEnabled(object sender, EventArgs e)
+        private void ToggleEnabled(object sender = null, EventArgs e = null)
         {
             if (textBoxFileName.TextLength == 0 && comboBoxExistingTeam.SelectedIndex <= 0 && comboBoxSavedView.SelectedIndex <= 0)
             {
                 listViewUsers.Items.Clear();
             }
-            listViewUsers.Enabled = listViewUsers.Items.Count > 0;
 
             checkBoxRemoveOthers.Enabled = tabControl1.SelectedTab == tabTeams && radioButtonAdd.Checked;
             if (!checkBoxRemoveOthers.Enabled) checkBoxRemoveOthers.Checked = false;
@@ -465,15 +476,7 @@ namespace XRMPlugin.TeamManager
 
         private void buttonProcessChanges_Click(object sender, EventArgs e)
         {
-            var request = new ExecuteMultipleRequest
-            {
-                Settings = new ExecuteMultipleSettings()
-                {
-                    ContinueOnError = true,
-                    ReturnResponses = false
-                },
-                Requests = new OrganizationRequestCollection()
-            };
+            var requests = new List<OrganizationRequest>();
 
             var selectedUserIds = listViewUsers.Items.Cast<ListViewItem>().Select(i => (User)i.Tag).Where(u => !u.Disabled).Select(u => u.Id).ToArray();
             var selectedEntity = tabControl1.SelectedTab.Tag.ToString();
@@ -488,92 +491,173 @@ namespace XRMPlugin.TeamManager
                 selectedIds = listBoxRoles.SelectedItems.Cast<Role>().Select(t => t.Id).ToArray();
             }
 
-            if (radioButtonRemove.Checked)
-            {
-                foreach (var selectedId in selectedIds)
-                {
-                    request.Requests.Add(CreateRemoveRequest(selectedEntity, selectedId, selectedUserIds));
-                }
-            }
-            if (radioButtonAdd.Checked)
-            {
-                foreach (var selectedId in selectedIds)
-                {
-                    request.Requests.Add(CreateAddRequest(selectedEntity, selectedId, selectedUserIds));
-                }
-                if (checkBoxRemoveOthers.Checked)
-                {
-                    var requests = new OrganizationRequestCollection();
-                    requests.AddRange(CreateRemoveRequests(selectedUserIds, selectedIds));
-                    request.Requests.Add(new ExecuteTransactionRequest { Requests = requests });
-                }
-            }
+            var isAdd = radioButtonAdd.Checked;
+            var isRemove = radioButtonRemove.Checked;
+            var removeOthers = checkBoxRemoveOthers.Checked;
 
-            if (request.Requests.Any())
+            WorkAsync(new WorkAsyncInfo
             {
-                WorkAsync(new WorkAsyncInfo
+                Message = "Processing changes",
+                Work = (worker, args) =>
                 {
-                    Message = "Processing changes",
-                    Work = (worker, args) =>
+                    if (isRemove)
                     {
-                        args.Result = Service.Execute(request);
-                    },
-                    PostWorkCallBack = (args) =>
-                    {
-                        if (args.Error != null)
+                        foreach (var selectedId in selectedIds)
                         {
-                            ShowErrorDialog(args.Error);
+                            requests.AddRange(CreateRemoveRequest(selectedEntity, selectedId, selectedUserIds));
+                        }
+                    }
+                    if (isAdd)
+                    {
+                        foreach (var selectedId in selectedIds)
+                        {
+                            requests.AddRange(CreateAddRequest(selectedEntity, selectedId, selectedUserIds));
+                        }
+                        if (removeOthers)
+                        {
+                            requests.AddRange(CreateRemoveRequests(selectedUserIds, selectedIds));
+                        }
+                    }
+
+                    if (requests.Any())
+                    {
+                        var successes = 0;
+                        foreach (var request in requests)
+                        {
+                            try
+                            {
+                                Service.Execute(request);
+                                successes++;
+                            }
+                            catch (Exception)
+                            {
+                            }
+                        }
+                        args.Result = successes;
+                    }
+                },
+                PostWorkCallBack = (args) =>
+                {
+                    if (args.Error != null)
+                    {
+                        ShowErrorDialog(args.Error);
+                    }
+                    else if (args.Result != null)
+                    {
+                        var successes = (int)args.Result;
+                        if (successes > 0)
+                        {
+                            if (successes == requests.Count)
+                            {
+                                MessageBox.Show("Changes processed successfully.");
+                            }
+                            else
+                            {
+                                MessageBox.Show($"Change processing partially successfully.");
+                            }
                         }
                         else
                         {
-                            MessageBox.Show("Changes processed successfully.");
+                            MessageBox.Show("Change processing failed!");
                         }
-                        PopulateUserList(UserQuery);
                     }
-                });
-            }
+                    PopulateUserList(UserQuery);
+                }
+            });
         }
 
-        private OrganizationRequest CreateAddRequest(string entity, Guid id, Guid[] users)
+        private IEnumerable<OrganizationRequest> CreateAddRequest(string entity, Guid id, Guid[] users)
         {
+            var requests = new List<OrganizationRequest>();
+            var userQuery = new QueryExpression("systemuser");
+            userQuery.Criteria.AddCondition(new ConditionExpression("systemuserid", ConditionOperator.In, users));
+
             if (entity == "Team")
             {
-                return new AddMembersTeamRequest
+                var teamLink = userQuery.AddLink("teammembership", "systemuserid", "systemuserid", JoinOperator.NotAny);
+                teamLink.LinkCriteria.AddCondition("teamid", ConditionOperator.Equal, id);
+                var filteredUsers = Service.RetrieveMultiple(userQuery);
+
+                if (filteredUsers.Entities.Any())
                 {
-                    TeamId = id,
-                    MemberIds = users
-                };
+                    for (int i = 0; i < filteredUsers.Entities.Count; i += 1000)
+                    {
+                        requests.Add(new AddMembersTeamRequest
+                        {
+                            TeamId = id,
+                            MemberIds = filteredUsers.Entities.Skip(i).Take(1000).Select(u => u.Id).ToArray()
+                        });
+                    }
+                }
             }
             else
             {
-                return new AssociateRequest
+                var userRoleLink = userQuery.AddLink("systemuserroles", "systemuserid", "systemuserid", JoinOperator.NotAny);
+                userRoleLink.LinkCriteria.AddCondition("roleid", ConditionOperator.Equal, id);
+                var filteredUsers = Service.RetrieveMultiple(userQuery);
+
+                if (filteredUsers.Entities.Any())
                 {
-                    Target = new EntityReference("role", id),
-                    Relationship = new Relationship("systemuserroles_association"),
-                    RelatedEntities = new EntityReferenceCollection(users.Select(uid => new EntityReference("systemuser", uid)).ToList())
-                };
+                    for (int i = 0; i < filteredUsers.Entities.Count; i += 1000)
+                    {
+                        requests.Add(new AssociateRequest
+                        {
+                            Target = new EntityReference("role", id),
+                            Relationship = new Relationship("systemuserroles_association"),
+                            RelatedEntities = new EntityReferenceCollection(filteredUsers.Entities.Skip(i).Take(1000).Select(u => u.ToEntityReference()).ToArray())
+                        });
+                    }
+                }
             }
+
+            return requests;
         }
 
-        private OrganizationRequest CreateRemoveRequest(string entity, Guid id, Guid[] users)
+        private IEnumerable<OrganizationRequest> CreateRemoveRequest(string entity, Guid id, Guid[] users)
         {
+            var requests = new List<OrganizationRequest>();
+            var userQuery = new QueryExpression("systemuser");
+            userQuery.Criteria.AddCondition(new ConditionExpression("systemuserid", ConditionOperator.In, users));
+
             if (entity == "Team")
             {
-                return new RemoveMembersTeamRequest
+                var teamLink = userQuery.AddLink("teammembership", "systemuserid", "systemuserid", JoinOperator.Any);
+                teamLink.LinkCriteria.AddCondition("teamid", ConditionOperator.Equal, id);
+                var filteredUsers = Service.RetrieveMultiple(userQuery);
+
+                if (filteredUsers.Entities.Any())
                 {
-                    TeamId = id,
-                    MemberIds = users
-                };
+                    for (int i = 0; i < filteredUsers.Entities.Count; i += 1000)
+                    {
+                        requests.Add(new RemoveMembersTeamRequest
+                        {
+                            TeamId = id,
+                            MemberIds = filteredUsers.Entities.Skip(i).Take(1000).Select(u => u.Id).ToArray()
+                        });
+                    }
+                }
             }
             else
             {
-                return new DisassociateRequest
+                var userRoleLink = userQuery.AddLink("systemuserroles", "systemuserid", "systemuserid", JoinOperator.Any);
+                userRoleLink.LinkCriteria.AddCondition("roleid", ConditionOperator.Equal, id);
+                var filteredUsers = Service.RetrieveMultiple(userQuery);
+
+                if (filteredUsers.Entities.Any())
                 {
-                    Target = new EntityReference("role", id),
-                    Relationship = new Relationship("systemuserroles_association"),
-                    RelatedEntities = new EntityReferenceCollection(users.Select(uid => new EntityReference("systemuser", uid)).ToList())
-                };
+                    for (int i = 0; i < filteredUsers.Entities.Count; i += 1000)
+                    {
+                        requests.Add(new DisassociateRequest
+                        {
+                            Target = new EntityReference("role", id),
+                            Relationship = new Relationship("systemuserroles_association"),
+                            RelatedEntities = new EntityReferenceCollection(filteredUsers.Entities.Skip(i).Take(1000).Select(u => u.ToEntityReference()).ToArray())
+                        });
+                    }
+                }
             }
+
+            return requests;
         }
 
         private IEnumerable<OrganizationRequest> CreateRemoveRequests(Guid[] users, Guid[] excludedTeamIds)
@@ -589,7 +673,7 @@ namespace XRMPlugin.TeamManager
             var memberships = Service.RetrieveMultiple(membershipQuery);
 
             return memberships.Entities.GroupBy(m => m.GetAttributeValue<Guid>("teamid"), m => m.GetAttributeValue<Guid>("systemuserid"))
-                .Select(g => CreateRemoveRequest("Team", g.Key, g.ToArray()));
+                .SelectMany(g => CreateRemoveRequest("Team", g.Key, g.ToArray()));
         }
     }
 }

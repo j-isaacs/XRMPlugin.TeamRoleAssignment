@@ -60,6 +60,7 @@ namespace XRMPlugin.TeamManager
             this.listBoxRoles = new System.Windows.Forms.ListBox();
             this.contextMenuStripUsers = new System.Windows.Forms.ContextMenuStrip(this.components);
             this.toolStripRemoveUser = new System.Windows.Forms.ToolStripMenuItem();
+            this.openFileDialog = new System.Windows.Forms.OpenFileDialog();
             this.toolStripMenu.SuspendLayout();
             this.groupBoxAction.SuspendLayout();
             this.groupBox1.SuspendLayout();
@@ -254,6 +255,7 @@ namespace XRMPlugin.TeamManager
             this.textBoxFileName.Location = new System.Drawing.Point(85, 23);
             this.textBoxFileName.Margin = new System.Windows.Forms.Padding(5);
             this.textBoxFileName.Name = "textBoxFileName";
+            this.textBoxFileName.ReadOnly = true;
             this.textBoxFileName.Size = new System.Drawing.Size(180, 20);
             this.textBoxFileName.TabIndex = 1;
             // 
@@ -288,7 +290,6 @@ namespace XRMPlugin.TeamManager
             this.listViewUsers.TabIndex = 0;
             this.listViewUsers.UseCompatibleStateImageBehavior = false;
             this.listViewUsers.View = System.Windows.Forms.View.Details;
-            this.listViewUsers.EnabledChanged += new System.EventHandler(this.ToggleEnabled);
             this.listViewUsers.DragDrop += new System.Windows.Forms.DragEventHandler(this.listViewUsers_DragDrop);
             this.listViewUsers.DragEnter += new System.Windows.Forms.DragEventHandler(this.listViewUsers_DragEnter);
             this.listViewUsers.MouseClick += new System.Windows.Forms.MouseEventHandler(this.listViewUsers_MouseClick);
@@ -404,6 +405,13 @@ namespace XRMPlugin.TeamManager
             this.toolStripRemoveUser.Text = "Remove User";
             this.toolStripRemoveUser.Click += new System.EventHandler(this.toolStripRemoveUser_Click);
             // 
+            // openFileDialog
+            // 
+            this.openFileDialog.Filter = "All supported files|*.csv;*.txt;*.xls;*.xlsx|csv files (*.csv)|*.csv|txt files (*" +
+    ".txt)|*.txt|Excel files (*.xls; *.xlsx)|*.xls;*.xlsx";
+            this.openFileDialog.RestoreDirectory = true;
+            this.openFileDialog.Title = "Select User List";
+            // 
             // MyPluginControl
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
@@ -464,5 +472,6 @@ namespace XRMPlugin.TeamManager
         private System.Windows.Forms.CheckBox checkBoxRemoveOthers;
         private System.Windows.Forms.ContextMenuStrip contextMenuStripUsers;
         private System.Windows.Forms.ToolStripMenuItem toolStripRemoveUser;
+        private System.Windows.Forms.OpenFileDialog openFileDialog;
     }
 }
