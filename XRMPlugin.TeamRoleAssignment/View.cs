@@ -1,35 +1,13 @@
-﻿using System;
-using Microsoft.Xrm.Sdk;
+﻿using Microsoft.Xrm.Sdk;
 
-namespace XRMPlugin.TeamManager
+namespace XRMPlugin.TeamRoleAssignment
 {
-    class View
+    class View : ListEntity
     {
-        private Entity ViewEntity;
+        public string FetchXml => entity.GetAttributeValue<string>("fetchxml");
 
-        public Guid Id
-        {
-            get { return ViewEntity.Id; }
-        }
+        public override string Group => entity.LogicalName == "savedquery" ? "System Views" : "User Views";
 
-        public string Name
-        {
-            get { return ViewEntity.GetAttributeValue<string>("name"); }
-        }
-
-        public string FetchXml
-        {
-            get { return ViewEntity.GetAttributeValue<string>("fetchxml"); }
-        }
-
-        public View(Entity viewEntity)
-        {
-            ViewEntity = viewEntity;
-        }
-
-        public override string ToString()
-        {
-            return Name;
-        }
+        public View(Entity entity) : base(entity) { }
     }
 }

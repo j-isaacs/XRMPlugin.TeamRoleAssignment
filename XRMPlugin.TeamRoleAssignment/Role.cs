@@ -1,30 +1,27 @@
 ﻿using System;
 using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Messages;
 
-namespace XRMPlugin.TeamManager
+namespace XRMPlugin.TeamRoleAssignment
 {
-    class Role
+    internal class Role : AssignableEntity
     {
-        private Entity RoleEntity;
+        public Role(Entity entity) : base(entity) { }
 
-        public Guid Id
-        {
-            get { return RoleEntity.Id; }
-        }
+        public override (string linkEntity, string entityId) Details => ("systemuserroles", "roleid");
 
-        public string Name
+        public override OrganizationRequest CreateAssignRequest(Guid userId) => new AssociateRequest
         {
-            get { return RoleEntity.GetAttributeValue<string>("name"); }
-        }
+            Target = entity.ToEntityReference(),
+            Relationship = new Relationship("systemuserroles_association"),
+            RelatedEntities = new EntityReferenceCollection { new EntityReference("systemuser", userId) }
+        };
 
-        public Role(Entity roleEntity)
+        public override OrganizationRequest CreateUnassignRequest(Guid userId) => new DisassociateRequest
         {
-            RoleEntity = roleEntity;
-        }
-
-        public override string ToString()
-        {
-            return Name;
-        }
+            Target = entity.ToEntityReference(),
+            Relationship = new Relationship("systemuserroles_association"),
+            RelatedEntities = new EntityReferenceCollection { new EntityReference("systemuser", userId) }
+        };
     }
 }

@@ -1,257 +1,173 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Data;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Threading;
 using System.Windows.Forms;
 using McTools.Xrm.Connection;
-using Microsoft.Crm.Sdk.Messages;
 using Microsoft.Xrm.Sdk;
-using Microsoft.Xrm.Sdk.Messages;
-using Microsoft.Xrm.Sdk.Query;
+using XRMPlugin.TeamRoleAssignment.Properties;
 using XrmToolBox.Extensibility;
+using XrmToolBox.Extensibility.Args;
+using XrmToolBox.Extensibility.Interfaces;
 using Excel = Microsoft.Office.Interop.Excel;
 
-namespace XRMPlugin.TeamManager
+namespace XRMPlugin.TeamRoleAssignment
 {
-    public partial class MyPluginControl : PluginControlBase
+    public partial class MyPluginControl : PluginControlBase, IStatusBarMessenger, IGitHubPlugin, IMessageBusHost
     {
-        private Settings mySettings;
-        private Team SelectedTeam;
-        private View SelectedView;
-        private QueryExpression UserQuery;
-        private ListViewItem SelectedListUser;
+        private readonly double scrollMargin = SystemInformation.VerticalScrollBarWidth * 1.5;
+
+        private readonly Settings UserSettings;
+        private XrmContext xrmContext;
+        private ListEntity Selected;
+        private HashSet<string> LoadedUserNames;
+        private string UserFetchXml;
+        private List<ListViewItem> Items = new List<ListViewItem>();
+
+        public event EventHandler<StatusBarMessageEventArgs> SendMessageToStatusBar;
+        public event EventHandler<MessageBusEventArgs> OnOutgoingMessage;
+
+        #region IGitHubPlugin implementation
+
+        public string RepositoryName => "XRMPlugin.TeamRoleAssignment";
+
+        public string UserName => "j-isaacs";
+
+        #endregion IGitHubPlugin implementation
 
         public MyPluginControl()
         {
             InitializeComponent();
-        }
 
-        private void MyPluginControl_Load(object sender, EventArgs e)
-        {
-            // Loads or creates the settings for the plugin
-            if (!SettingsManager.Instance.TryLoad(GetType(), out mySettings))
+            if (!SettingsManager.Instance.TryLoad(GetType(), out UserSettings))
             {
-                mySettings = new Settings();
+                UserSettings = new Settings();
 
                 LogWarning("Settings not found => a new settings file has been created!");
             }
             else
             {
                 LogInfo("Settings found and loaded");
+                userList1.ShowDisabled = UserSettings.ShowDisabledUsers;
+                listSelector1.DefaultFilePath = UserSettings.DefaultFilePath;
+                CheckBoxReview.Checked = UserSettings.ReviewChanges;
             }
+
+            listSelector1.FilesSelected += ListSelector_FilesSelected;
+            listSelector1.OpenFetchXmlDialog += ListSelector_OpenFetchXmlDialog;
         }
 
-        private void tsbClose_Click(object sender, EventArgs e)
+        public override void ClosingPlugin(PluginCloseInfo info)
         {
-            CloseTool();
+            base.ClosingPlugin(info);
+            if (!info.Cancel) SettingsManager.Instance.Save(GetType(), UserSettings);
         }
 
-        /// <summary>
-        /// This event occurs when the plugin is closed
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
-        private void MyPluginControl_OnCloseTool(object sender, EventArgs e)
-        {
-            // Before leaving, save the settings
-            SettingsManager.Instance.Save(GetType(), mySettings);
-        }
-
-        /// <summary>
-        /// This event occurs when the connection has been updated in XrmToolBox
-        /// </summary>
         public override void UpdateConnection(IOrganizationService newService, ConnectionDetail detail, string actionName, object parameter)
         {
             base.UpdateConnection(newService, detail, actionName, parameter);
 
-            if (mySettings != null && detail != null)
+            WorkAsync(new WorkAsyncInfo
             {
-                mySettings.LastUsedOrganizationWebappUrl = detail.WebApplicationUrl;
-                LogInfo("Connection has changed to: {0}", detail.WebApplicationUrl);
-            }
+                Message = "Loading org data",
+                Work = (worker, args) =>
+                {
+                    xrmContext = new XrmContext(Service, xrmContext);
 
-            LoadTeams();
-            LoadRoles();
-            LoadSavedViews();
-            if (!string.IsNullOrEmpty(textBoxFileName.Text))
+                    SetWorkingMessage("Populating lists");
+                    Thread.Sleep(10);
+
+                    listSelector1.Invoke(new Action(() => { listSelector1.Context = xrmContext; }));
+                    assignmentSelector1.Invoke(new Action(() => { assignmentSelector1.Context = xrmContext; }));
+
+                    //if (xrmContext.LoadedUserNames != null) newContext.LoadedUserNames = LoadedUserNames;
+                    //if (xrmContext.UserFetchXml != null) newContext.UserFetchXml = UserFetchXml;
+                },
+                PostWorkCallBack = (args) =>
+                {
+                    if (args.Error != null)
+                    {
+                        ShowErrorDialog(args.Error);
+                        //ToggleEnabled();
+                    }
+                    else
+                    {
+                        //ButtonBrowse.Enabled = true;
+                        //ButtonFetchXML.Enabled = true;
+
+                        //if (Selected == null) PopulateUserList();
+                    }
+                }
+            });
+        }
+
+        private void LoadLists<T>(ComboBox comboBox, ListView listView, bool includeDisabled = false) where T : ListEntity
+        {
+            var entities = xrmContext.GetList<T>();
+            comboBox?.Invoke(new Action(() =>
             {
-                PopulateUserList(UserQuery);
-            }
+                comboBox.Items.Clear();
+                comboBox.Items.AddRange(entities.ToArray());
+                if (Selected is T selected)
+                {
+                    Selected = null;
+                    comboBox.SelectedItem = comboBox.Items.Cast<T>().FirstOrDefault(e => e.Name == selected.Name && e.Id != Guid.Empty);
+                }
+            }));
+
+            listView?.Invoke(new Action(() =>
+            {
+                var checkedItems = listView.CheckedItems.Cast<ListViewItem>().Select(i => i.Text).ToHashSet();
+                listView.Items.Clear();
+                listView.Items.AddRange(
+                    entities.Where(e => includeDisabled || !e.Disabled).Select(e => new ListViewItem(e.ListItems)
+                    {
+                        Tag = e,
+                        Checked = checkedItems.Contains(e.Name),
+                        ForeColor = e.Disabled ? Color.Gray : Color.Empty
+                    }).ToArray());
+            }));
         }
 
         private void ResetForm(Control excludedControl)
         {
-            if (excludedControl != comboBoxExistingTeam && comboBoxExistingTeam.SelectedIndex > 0) comboBoxExistingTeam.SelectedIndex = -1;
-            if (excludedControl != comboBoxSavedView && comboBoxSavedView.SelectedIndex > 0) comboBoxSavedView.SelectedIndex = -1;
-            if (excludedControl != textBoxFileName) textBoxFileName.Clear();
-            if (listBoxTeams.SelectedIndices.Count > 0) listBoxTeams.SelectedItems.Clear();
-            if (listBoxRoles.SelectedIndices.Count > 0) listBoxRoles.SelectedItems.Clear();
-            if (radioButtonAdd.Checked) radioButtonAdd.Checked = false;
-            if (radioButtonRemove.Checked) radioButtonRemove.Checked = false;
-            if (checkBoxRemoveOthers.Checked) checkBoxRemoveOthers.Checked = false;
-            listViewUsers.Items.Clear();
+            Selected = null;
+            LoadedUserNames = null;
+            UserFetchXml = null;
+            if (excludedControl != ComboBoxTeams) ComboBoxTeams.SelectedItem = null;
+            if (excludedControl != ComboBoxRoles) ComboBoxRoles.SelectedItem = null;
+            if (excludedControl != ComboBoxViews) ComboBoxViews.SelectedItem = null;
+            if (excludedControl != TextBoxFileName) TextBoxFileName.Clear();
+            if (excludedControl != ButtonFetchXML) ButtonFetchXML.Font = ButtonBrowse.Font;
+            while (ListViewTeams.CheckedItems.Count > 0) ListViewTeams.CheckedItems[0].Checked = false;
+            while (ListViewRoles.CheckedItems.Count > 0) ListViewRoles.CheckedItems[0].Checked = false;
+            RadioButtonAdd.Checked = false;
+            RadioButtonRemove.Checked = false;
+            CheckBoxRemoveOthers.Checked = false;
         }
 
-        private void LoadTeams()
+        private void ListSelector_FilesSelected(object sender, EventArgs e)
         {
-            WorkAsync(new WorkAsyncInfo
-            {
-                Work = (worker, args) =>
-                {
-                    var teamQuery = new QueryExpression("team");
-                    teamQuery.ColumnSet.AddColumns("name");
-                    teamQuery.Criteria.AddCondition("isdefault", ConditionOperator.Equal, false);
-                    teamQuery.Criteria.AddCondition("teamtype", ConditionOperator.Equal, 0);
-                    teamQuery.AddOrder("name", OrderType.Ascending);
-                    var result = Service.RetrieveMultiple(teamQuery);
-
-                    args.Result = result.Entities.Select(t => new Team(t));
-                },
-                PostWorkCallBack = (args) =>
-                {
-                    if (args.Error != null)
-                    {
-                        ShowErrorDialog(args.Error);
-                    }
-
-                    var teams = args.Result as IEnumerable<Team>;
-                    if (teams != null && teams.Any())
-                    {
-                        comboBoxExistingTeam.Items.Clear();
-                        comboBoxExistingTeam.Items.AddRange(teams.ToArray());
-                        if (SelectedTeam != null) comboBoxExistingTeam.SelectedItem = comboBoxExistingTeam.Items.Cast<Team>().FirstOrDefault(t => t.Name == SelectedTeam.Name);
-                        var selectedTeams = listBoxTeams.SelectedItems.Cast<Team>().Select(t => t.Name).ToArray();
-                        listBoxTeams.Items.Clear();
-                        listBoxTeams.Items.AddRange(teams.ToArray());
-                        if (selectedTeams.Any())
-                        {
-                            foreach (var item in listBoxTeams.Items.Cast<Team>().Where(t => selectedTeams.Contains(t.Name)).ToArray())
-                            {
-                                listBoxTeams.SelectedItems.Add(item);
-                            }
-                        }
-                    }
-                }
-            });
+            LoadUserListFromFiles(listSelector1.SelectedFiles);
         }
 
-        private void LoadRoles()
+        private void MyPluginControl_DragDrop(object sender, DragEventArgs e)
         {
-            WorkAsync(new WorkAsyncInfo
-            {
-                Work = (worker, args) =>
-                {
-                    var roleQuery = new QueryExpression("role");
-                    roleQuery.ColumnSet.AddColumns("name");
-                    roleQuery.AddOrder("name", OrderType.Ascending);
-                    var result = Service.RetrieveMultiple(roleQuery);
-
-                    args.Result = result.Entities.Select(t => new Role(t));
-                },
-                PostWorkCallBack = (args) =>
-                {
-                    if (args.Error != null)
-                    {
-                        ShowErrorDialog(args.Error);
-                    }
-
-                    var roles = args.Result as IEnumerable<Role>;
-                    if (roles != null && roles.Any())
-                    {
-                        var selectedRoles = listBoxRoles.SelectedItems.Cast<Role>().Select(t => t.Name).ToArray();
-                        listBoxRoles.Items.Clear();
-                        listBoxRoles.Items.AddRange(roles.ToArray());
-                        if (selectedRoles.Any())
-                        {
-                            foreach (var item in listBoxRoles.Items.Cast<Role>().Where(t => selectedRoles.Contains(t.Name)).ToArray())
-                            {
-                                listBoxRoles.SelectedItems.Add(item);
-                            }
-                        }
-                    }
-                }
-            });
+            if (e.Data.GetDataPresent(DataFormats.FileDrop)) listSelector1.SelectedFiles = (string[])e.Data.GetData(DataFormats.FileDrop);
         }
 
-        private void LoadSavedViews()
+        private void MyPluginControl_DragEnter(object sender, DragEventArgs e)
         {
-            WorkAsync(new WorkAsyncInfo
-            {
-                Work = (worker, args) =>
-                {
-                    var systemViewQuery = new QueryExpression("savedquery");
-                    systemViewQuery.ColumnSet.AddColumns("name", "fetchxml");
-                    systemViewQuery.Criteria.AddCondition("querytype", ConditionOperator.Equal, 0);
-                    systemViewQuery.Criteria.AddCondition("statecode", ConditionOperator.Equal, 0);
-                    systemViewQuery.Criteria.AddCondition("returnedtypecode", ConditionOperator.Equal, "systemuser");
-                    systemViewQuery.AddOrder("name", OrderType.Ascending);
-                    var systemViewResults = Service.RetrieveMultiple(systemViewQuery);
-
-                    var userViewQuery = new QueryExpression("userquery");
-                    userViewQuery.ColumnSet.AddColumns("name", "fetchxml");
-                    userViewQuery.Criteria.AddCondition("returnedtypecode", ConditionOperator.Equal, "systemuser");
-                    userViewQuery.AddOrder("name", OrderType.Ascending);
-                    var userViewResults = Service.RetrieveMultiple(userViewQuery);
-
-                    args.Result = systemViewResults.Entities.Concat(userViewResults.Entities).Select(v => new View(v));
-                },
-                PostWorkCallBack = (args) =>
-                {
-                    if (args.Error != null)
-                    {
-                        ShowErrorDialog(args.Error);
-                    }
-
-                    var views = args.Result as IEnumerable<View>;
-                    if (args.Result != null && views.Any())
-                    {
-                        comboBoxSavedView.Items.Clear();
-                        comboBoxSavedView.Items.AddRange(views.ToArray());
-                        if (SelectedView != null) comboBoxSavedView.SelectedItem = comboBoxSavedView.Items.Cast<object>().FirstOrDefault(t => t.ToString() == SelectedView.ToString()) ?? "";
-                    }
-                }
-            });
-        }
-
-        private void buttonBrowse_Click(object sender, EventArgs e)
-        {
-            //var openFileDialog = new OpenFileDialog
-            //{
-            //    Title = "Select User List",
-            //    Filter = "All supported files|*.csv;*.txt;*.xls;*.xlsx|csv files (*.csv)|*.csv|txt files (*.txt)|*.txt|Excel files (*.xls; *.xlsx)|*.xls;*.xlsx",
-            //    RestoreDirectory = true
-            //};
-
-            if (openFileDialog.ShowDialog() == DialogResult.OK)
-            {
-                textBoxFileName.Text = openFileDialog.FileName;
-                LoadUserListFromFiles(openFileDialog.FileNames);
-            }
-        }
-
-        private void listViewUsers_DragDrop(object sender, DragEventArgs e)
-        {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
-            {
-                var files = (string[])e.Data.GetData(DataFormats.FileDrop);
-                textBoxFileName.Text = files[0];
-                LoadUserListFromFiles(files);
-            }
-        }
-
-        private void listViewUsers_DragEnter(object sender, DragEventArgs e)
-        {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.All;
+            if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy;
         }
 
         private void LoadUserListFromFiles(string[] files)
         {
-            ResetForm(textBoxFileName);
+            UserSettings.DefaultFilePath = Path.GetDirectoryName(files[0]);
+
             WorkAsync(new WorkAsyncInfo
             {
                 Message = "Loading file",
@@ -269,12 +185,12 @@ namespace XRMPlugin.TeamManager
                             while (!reader.EndOfStream)
                             {
                                 var user = reader.ReadLine().Split(new[] { ',', '\t' }, 2)[0];
-                                userList.Add(user);
+                                if (!string.IsNullOrWhiteSpace(user)) userList.Add(user);
                             }
                         }
                     }
 
-                    var excelExtensions = new string[] { ".xls", ".xlsx" };
+                    var excelExtensions = new string[] { ".xls", ".xlsb", ".xlsx" };
                     foreach (var file in files.Where(f => excelExtensions.Contains(Path.GetExtension(f))))
                     {
                         var xlApp = new Excel.Application();
@@ -291,18 +207,11 @@ namespace XRMPlugin.TeamManager
 
                         foreach (object cell in (Array)xlRange.Value)
                         {
-                            userList.Add(cell.ToString());
+                            if (!string.IsNullOrWhiteSpace(cell.ToString())) userList.Add(cell.ToString());
                         }
                     }
 
-                    if (userList.Any())
-                    {
-                        var userQuery = new QueryExpression("systemuser");
-                        userQuery.ColumnSet.AddColumns("domainname", "firstname", "lastname", "isdisabled");
-                        userQuery.Criteria.AddCondition("domainname", ConditionOperator.In, userList.ToArray());
-                        userQuery.AddOrder("domainname", OrderType.Ascending);
-                        args.Result = userQuery;
-                    }
+                    if (userList.Count == 0) throw new Exception("File does not contain any users or is in an incorrect format.");
                 },
                 PostWorkCallBack = (args) =>
                 {
@@ -310,95 +219,90 @@ namespace XRMPlugin.TeamManager
                     {
                         ShowErrorDialog(args.Error);
                     }
-                    var query = args.Result as QueryExpression;
-                    PopulateUserList(query);
+                    else
+                    {
+                        xrmContext.SetUserQuery(LoadedUserNames);
+                    }
                 }
             });
         }
 
-        private void comboBoxExistingTeam_SelectedIndexChanged(object sender, EventArgs e)
+        private void ListSelector_OpenFetchXmlDialog(object sender, EventArgs e)
         {
-            if (comboBoxExistingTeam.SelectedItem != null && comboBoxExistingTeam.SelectedItem.ToString() != SelectedTeam?.ToString())
-            {
-                ResetForm(comboBoxExistingTeam);
-            }
+            var fetchXml = xrmContext.UserFetchXml ?? xrmContext.GetUserFetchXml();
 
-            SelectedTeam = comboBoxExistingTeam.SelectedItem as Team;
-
-            if (SelectedTeam != null)
+            using (var dialog = new FetchXMLDialog(fetchXml))
             {
-                var userQuery = new QueryExpression("systemuser");
-                userQuery.ColumnSet.AddColumns("domainname", "firstname", "lastname", "isdisabled");
-                userQuery.AddOrder("domainname", OrderType.Ascending);
-                var teamLink = userQuery.AddLink("teammembership", "systemuserid", "systemuserid");
-                teamLink.LinkCriteria.AddCondition("teamid", ConditionOperator.Equal, SelectedTeam.Id);
-                PopulateUserList(userQuery);
-            }
-            else
-            {
-                ToggleEnabled();
-            }
-        }
+                dialog.MaximumSize = Size;
+                var result = dialog.ShowDialog(this);
 
-        private void comboBoxSavedView_SelectedIndexChanged(object sender, EventArgs e)
-        {
-            if (comboBoxSavedView.SelectedItem != null && comboBoxSavedView.SelectedItem.ToString() != SelectedView?.ToString())
-            {
-                ResetForm(comboBoxSavedView);
-            }
-
-            SelectedView = comboBoxSavedView.SelectedItem as View;
-
-            if (SelectedView != null)
-            {
-                WorkAsync(new WorkAsyncInfo
+                if (result == DialogResult.OK)
                 {
-                    Message = "Loading view",
-                    Work = (worker, args) =>
+                    LoadQueryFromXml(dialog.FetchXml);
+                }
+                else if (result == DialogResult.Yes)
+                {
+                    OnOutgoingMessage(this, new MessageBusEventArgs("FetchXML Builder")
                     {
-                        FetchXmlToQueryExpressionRequest fetchXmlToQueryExpressionRequest = new FetchXmlToQueryExpressionRequest()
-                        {
-                            FetchXml = SelectedView.FetchXml
-                        };
-                        var fetchXmlToQueryExpressionResponse = Service.Execute(fetchXmlToQueryExpressionRequest) as FetchXmlToQueryExpressionResponse;
-                        var viewQueryExpression = fetchXmlToQueryExpressionResponse.Query;
-                        viewQueryExpression.ColumnSet = new ColumnSet("domainname", "firstname", "lastname", "isdisabled");
-                        viewQueryExpression.Orders.Clear();
-                        viewQueryExpression.AddOrder("domainname", OrderType.Ascending);
-                        args.Result = viewQueryExpression;
-                    },
-                    PostWorkCallBack = (args) =>
-                    {
-                        if (args.Error != null)
-                        {
-                            ShowErrorDialog(args.Error);
-                        }
-                        var query = args.Result as QueryExpression;
-                        PopulateUserList(query);
-                    }
-                });
-            }
-            else
-            {
-                ToggleEnabled();
+                        TargetArgument = dialog.FetchXml
+                    });
+                }
             }
         }
 
-        private void PopulateUserList(QueryExpression userQuery)
+        public void OnIncomingMessage(MessageBusEventArgs message)
         {
-            listViewUsers.Items.Clear();
-            ToggleEnabled();
-
-            if (userQuery != null)
+            if (message.SourcePlugin == "FetchXML Builder" && message.TargetArgument is string fetchXml)
             {
-                UserQuery = userQuery;
+                LoadQueryFromXml(fetchXml);
+            }
+        }
 
+        public void LoadQueryFromXml(string fetchXml)
+        {
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Loading query",
+                Work = (worker, args) =>
+                {
+                    xrmContext.SetUserQuery(fetchXml);
+                },
+                PostWorkCallBack = (args) =>
+                {
+                    if (args.Error != null)
+                    {
+                        ShowErrorDialog(args.Error);
+                        //ToggleEnabled();
+                    }
+                    else
+                    {
+                        //if (!ButtonFetchXML.Font.Bold) ButtonFetchXML.Font = new Font(ButtonFetchXML.Font, FontStyle.Bold);
+                        //UserFetchXml = fetchXml;
+                        //PopulateUserList();
+                    }
+                }
+            });
+        }
+
+        internal void PopulateUserList()
+        {
+            ListViewUsers.Items.Clear();
+
+            if (xrmContext?.HasUserQuery == true)
+            {
                 WorkAsync(new WorkAsyncInfo
                 {
                     Message = "Loading users",
                     Work = (worker, args) =>
                     {
-                        args.Result = Service.RetrieveMultiple(userQuery);
+                        xrmContext.LoadList<User>();
+
+                        //SetWorkingMessage("Updating user list");
+                        //Thread.Sleep(10);
+
+                        //LoadLists<User>(null, ListViewUsers, UserSettings.ShowDisabledUsers);
+
+                        args.Result = xrmContext.GetList<User>().Count;
                     },
                     PostWorkCallBack = (args) =>
                     {
@@ -406,135 +310,168 @@ namespace XRMPlugin.TeamManager
                         {
                             ShowErrorDialog(args.Error);
                         }
-
-                        var results = args.Result as EntityCollection;
-
-                        if (results.Entities.Any())
+                        else
                         {
-                            foreach (var userEntity in results.Entities)
-                            {
-                                var user = new User(userEntity);
-                                listViewUsers.Items.Add(new ListViewItem
-                                {
-                                    Tag = user,
-                                    Text = user.UserName,
-                                    SubItems =  {
-                                        user.LastName,
-                                        user.FirstName,
-                                        user.Status
-                                    },
-                                    ForeColor = user.Disabled ? Color.Gray : ForeColor
-                                });
-                            }
-                            ToggleEnabled();
+                            ListViewUsers.VirtualListSize = (int)args.Result;
+                            //SendMessageToStatusBar?.Invoke(this, new StatusBarMessageEventArgs($"{ListViewUsers.Items.Count} Users"));
+                            SendMessageToStatusBar?.Invoke(this, new StatusBarMessageEventArgs($"{ListViewUsers.VirtualListSize} Users"));
                         }
+
+                        ToggleEnabled();
                     }
                 });
             }
+            else
+            {
+                ToggleEnabled();
+            }
         }
-        private void listViewUsers_MouseClick(object sender, MouseEventArgs e)
+
+        private void ListViewUsers_MouseClick(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Right)
             {
-                var focusedItem = listViewUsers.FocusedItem;
+                var focusedItem = ListViewUsers.FocusedItem;
                 if (focusedItem != null && focusedItem.Bounds.Contains(e.Location))
                 {
-                    SelectedListUser = focusedItem;
-                    contextMenuStripUsers.Show(Cursor.Position);
+                    ContextMenuStripUsers.Show(Cursor.Position);
                 }
             }
         }
 
-        private void toolStripRemoveUser_Click(object sender, EventArgs e)
+        private void ToolStripRemove_Click(object sender, EventArgs e)
         {
-            listViewUsers.Items.Remove(SelectedListUser);
+            var option = sender as ToolStripMenuItem;
+            var users = xrmContext.GetList<User>();
+            var selectedUsers = users.Where((u, i) => ListViewUsers.SelectedIndices.Contains(i)).ToList();
+            ListViewUsers.BeginUpdate();
+            if (option == ToolStripRemoveOthers)
+            {
+                //foreach (ListViewItem item in ListViewUsers.Items.Cast<ListViewItem>().Except(ListViewUsers.SelectedItems.Cast<ListViewItem>())) ListViewUsers.Items.Remove(item);
+                ListViewUsers.VirtualListSize = ListViewUsers.SelectedIndices.Count;
+                foreach (ListEntity user in users.Except(selectedUsers).ToList()) users.Remove(user);
+            }
+            else
+            {
+                //foreach (ListViewItem item in ListViewUsers.SelectedItems) ListViewUsers.Items.Remove(item);
+                ListViewUsers.VirtualListSize -= ListViewUsers.SelectedIndices.Count;
+                foreach (ListEntity user in selectedUsers) users.Remove(user);
+            }
+
+            ListViewUsers.EndUpdate();
+            //if (ListViewUsers.Items.Count > 0) SendMessageToStatusBar?.Invoke(this, new StatusBarMessageEventArgs($"{ListViewUsers.Items.Count} Users"));
+            SendMessageToStatusBar?.Invoke(this, new StatusBarMessageEventArgs($"{ListViewUsers.VirtualListSize} Users"));
+            ToggleEnabled();
         }
 
-        private void tabControl1_Selecting(object sender, TabControlCancelEventArgs e)
+        private void ToolStripRefresh_Click(object sender, EventArgs e)
         {
-            radioButtonAdd.Text = e.TabPage.Text.Replace("Select", "Add to");
-            radioButtonRemove.Text = e.TabPage.Text.Replace("Select", "Remove from");
+            PopulateUserList();
+        }
 
-            ToggleEnabled();
+        private void ToolStripButtonShowDisabled_CheckedChanged(object sender, EventArgs e)
+        {
+            ToolStripButtonShowDisabled.Image = ToolStripButtonShowDisabled.Checked ? Resources.Checkmark : null;
+            UserSettings.ShowDisabledUsers = ToolStripButtonShowDisabled.Checked;
+            PopulateUserList();
+        }
+
+        private void TabControlTeamsRoles_Selecting(object sender, TabControlCancelEventArgs e)
+        {
+            if (ButtonCancel.Visible)
+            {
+                e.Cancel = true;
+            }
+            else
+            {
+                RadioButtonAdd.Checked = RadioButtonRemove.Checked = false;
+                RadioButtonAdd.Text = e.TabPage.Text.Replace("Select", "Add to");
+                RadioButtonRemove.Text = e.TabPage.Text.Replace("Select", "Remove from");
+
+                ToggleEnabled();
+            }
+        }
+
+        private void ListView_ItemCheck(object sender, ItemCheckEventArgs e)
+        {
+            if (ListViewUsers.Items.Count == 0 || ButtonCancel.Visible) e.NewValue = CheckState.Unchecked;
+        }
+
+        private void ListView_Resize(object sender, EventArgs e)
+        {
+            if (sender is ListView listView && listView.Visible && listView.Width != listView.Tag as int?)
+            {
+                listView.BeginUpdate();
+                listView.Tag = listView.Width;
+                var columnWidthUnit = (listView.Width - scrollMargin) / 10;
+
+                if (listView == ListViewUsers)
+                {
+                    ListViewUsers.Columns[0].Width = (int)(columnWidthUnit * 3);
+                    ListViewUsers.Columns[1].Width = (int)(columnWidthUnit * 2);
+                    ListViewUsers.Columns[2].Width = (int)(columnWidthUnit * 2);
+                    ListViewUsers.Columns[3].Width = (int)(columnWidthUnit * 2);
+                    ListViewUsers.Columns[4].Width = (int)(columnWidthUnit * 1);
+                }
+                else
+                {
+                    ListViewTeams.Columns[0].Width = (int)(columnWidthUnit * 7);
+                    ListViewTeams.Columns[1].Width = (int)(columnWidthUnit * 3);
+                    ListViewRoles.Columns[0].Width = (int)(columnWidthUnit * 7);
+                    ListViewRoles.Columns[1].Width = (int)(columnWidthUnit * 3);
+                }
+                listView.EndUpdate();
+            }
+        }
+
+        private void CheckBoxReview_CheckedChanged(object sender, EventArgs e)
+        {
+            UserSettings.ReviewChanges = CheckBoxReview.Checked;
+            ButtonProcessChanges.Text = UserSettings.ReviewChanges ? "Preview Changes" : "Process Changes";
         }
 
         private void ToggleEnabled(object sender = null, EventArgs e = null)
         {
-            if (textBoxFileName.TextLength == 0 && comboBoxExistingTeam.SelectedIndex <= 0 && comboBoxSavedView.SelectedIndex <= 0)
+            if (ListViewUsers.Items.Count == 0)
             {
-                listViewUsers.Items.Clear();
+                SendMessageToStatusBar?.Invoke(this, new StatusBarMessageEventArgs(""));
+                while (ListViewTeams.CheckedItems.Count > 0) ListViewTeams.CheckedItems[0].Checked = false;
+                while (ListViewRoles.CheckedItems.Count > 0) ListViewRoles.CheckedItems[0].Checked = false;
             }
 
-            checkBoxRemoveOthers.Enabled = tabControl1.SelectedTab == tabTeams && radioButtonAdd.Checked;
-            if (!checkBoxRemoveOthers.Enabled) checkBoxRemoveOthers.Checked = false;
+            if (ButtonCancel.Visible) ButtonCancel.PerformClick();
 
-            buttonProcessChanges.Enabled =
-                (radioButtonAdd.Checked || radioButtonRemove.Checked) && listViewUsers.Enabled &&
-                ((tabControl1.SelectedTab == tabTeams && listBoxTeams.SelectedIndices.Count > 0) ||
-                (tabControl1.SelectedTab == tabRoles && listBoxRoles.SelectedIndices.Count > 0));
+            RadioButtonRemove.Enabled = RadioButtonAdd.Enabled = ListViewTeams.Items.Count > 0 || ListViewRoles.Items.Count > 0;
+
+            CheckBoxRemoveOthers.Enabled = TabControlTeamsRoles.SelectedTab == TabTeams && RadioButtonAdd.Checked;
+            if (!CheckBoxRemoveOthers.Enabled) CheckBoxRemoveOthers.Checked = false;
+
+            ButtonProcessChanges.Enabled =
+                (RadioButtonAdd.Checked || RadioButtonRemove.Checked) &&
+                ((TabControlTeamsRoles.SelectedTab == TabTeams && ListViewTeams.CheckedItems.Count > 0) ||
+                (TabControlTeamsRoles.SelectedTab == TabRoles && ListViewRoles.CheckedItems.Count > 0));
         }
 
-        private void buttonProcessChanges_Click(object sender, EventArgs e)
+        private void ButtonProcessChanges_Click(object sender, EventArgs e)
         {
-            var requests = new List<OrganizationRequest>();
+            var selectedUsers = ListViewUsers.Items.Cast<ListViewItem>().Select(i => (User)i.Tag).Where(u => !u.Disabled).ToList();
 
-            var selectedUserIds = listViewUsers.Items.Cast<ListViewItem>().Select(i => (User)i.Tag).Where(u => !u.Disabled).Select(u => u.Id).ToArray();
-            var selectedEntity = tabControl1.SelectedTab.Tag.ToString();
-            Guid[] selectedIds;
-
-            if (selectedEntity == "Team")
+            if (selectedUsers.Count == 0)
             {
-                selectedIds = listBoxTeams.SelectedItems.Cast<Team>().Select(t => t.Id).ToArray();
-            }
-            else
-            {
-                selectedIds = listBoxRoles.SelectedItems.Cast<Role>().Select(t => t.Id).ToArray();
+                MessageBox.Show("No active users in list.");
+                return;
             }
 
-            var isAdd = radioButtonAdd.Checked;
-            var isRemove = radioButtonRemove.Checked;
-            var removeOthers = checkBoxRemoveOthers.Checked;
+            var selectedAssignments = TabControlTeamsRoles.SelectedTab.Controls.OfType<ListView>().First().CheckedItems.Cast<ListViewItem>()
+                .Select(i => (AssignableEntity)i.Tag).ToList();
 
             WorkAsync(new WorkAsyncInfo
             {
-                Message = "Processing changes",
+                IsCancelable = true,
+                Message = "Determining changes",
                 Work = (worker, args) =>
                 {
-                    if (isRemove)
-                    {
-                        foreach (var selectedId in selectedIds)
-                        {
-                            requests.AddRange(CreateRemoveRequest(selectedEntity, selectedId, selectedUserIds));
-                        }
-                    }
-                    if (isAdd)
-                    {
-                        foreach (var selectedId in selectedIds)
-                        {
-                            requests.AddRange(CreateAddRequest(selectedEntity, selectedId, selectedUserIds));
-                        }
-                        if (removeOthers)
-                        {
-                            requests.AddRange(CreateRemoveRequests(selectedUserIds, selectedIds));
-                        }
-                    }
-
-                    if (requests.Any())
-                    {
-                        var successes = 0;
-                        foreach (var request in requests)
-                        {
-                            try
-                            {
-                                Service.Execute(request);
-                                successes++;
-                            }
-                            catch (Exception)
-                            {
-                            }
-                        }
-                        args.Result = successes;
-                    }
+                    args.Result = xrmContext.GetAssignmentChanges(selectedUsers, selectedAssignments, RadioButtonAdd.Checked, CheckBoxRemoveOthers.Checked);
                 },
                 PostWorkCallBack = (args) =>
                 {
@@ -542,138 +479,139 @@ namespace XRMPlugin.TeamManager
                     {
                         ShowErrorDialog(args.Error);
                     }
-                    else if (args.Result != null)
+                    else if (args.Result is List<(User, List<(AssignableEntity, bool)>)> changes)
                     {
-                        var successes = (int)args.Result;
-                        if (successes > 0)
+                        if (!TreeViewChanges.Visible) PreviewChanges(changes);
+
+                        if (!UserSettings.ReviewChanges || TreeViewChanges.Visible)
                         {
-                            if (successes == requests.Count)
-                            {
-                                MessageBox.Show("Changes processed successfully.");
-                            }
-                            else
-                            {
-                                MessageBox.Show($"Change processing partially successfully.");
-                            }
-                        }
-                        else
-                        {
-                            MessageBox.Show("Change processing failed!");
+                            ProcessChanges(changes);
                         }
                     }
-                    PopulateUserList(UserQuery);
                 }
             });
         }
 
-        private IEnumerable<OrganizationRequest> CreateAddRequest(string entity, Guid id, Guid[] users)
+        private void ButtonCancel_Click(object sender, EventArgs e)
         {
-            var requests = new List<OrganizationRequest>();
-            var userQuery = new QueryExpression("systemuser");
-            userQuery.Criteria.AddCondition(new ConditionExpression("systemuserid", ConditionOperator.In, users));
+            ToolStripUserList.Enabled = true;
+            ListViewUsers.Enabled = ListViewUsers.Visible = true;
+            TreeViewChanges.Enabled = TreeViewChanges.Visible = false;
 
-            if (entity == "Team")
+            CheckBoxReview.Enabled = CheckBoxReview.Visible = true;
+            ButtonCancel.Enabled = ButtonCancel.Visible = false;
+
+            ButtonProcessChanges.Text = UserSettings.ReviewChanges ? "Preview Changes" : "Process Changes";
+
+            GroupBoxSelect.Enabled = true;
+            GroupBoxAction.Enabled = true;
+        }
+
+        private void PreviewChanges(List<(User user, List<(AssignableEntity assignment, bool isAdd)> userChanges)> changes)
+        {
+            TreeViewChanges.BeginUpdate();
+            TreeViewChanges.Nodes.Clear();
+            foreach (var (user, userChanges) in changes)
             {
-                var teamLink = userQuery.AddLink("teammembership", "systemuserid", "systemuserid", JoinOperator.NotAny);
-                teamLink.LinkCriteria.AddCondition("teamid", ConditionOperator.Equal, id);
-                var filteredUsers = Service.RetrieveMultiple(userQuery);
-
-                if (filteredUsers.Entities.Any())
+                var userNode = TreeViewChanges.Nodes.Add(user.Name);
+                foreach (var (assignment, isAdd) in userChanges)
                 {
-                    for (int i = 0; i < filteredUsers.Entities.Count; i += 1000)
+                    userNode.Nodes.Add($"{(isAdd ? "Add to" : "Remove from")} {assignment.GetType().Name} - {assignment.Name}");
+                }
+                if (userNode.Nodes.Count == 0) userNode.Nodes.Add("No changes");
+            }
+            TreeViewChanges.ExpandAll();
+            TreeViewChanges.EndUpdate();
+
+            ToolStripUserList.Enabled = false;
+            ListViewUsers.Enabled = ListViewUsers.Visible = false;
+            TreeViewChanges.Enabled = TreeViewChanges.Visible = true;
+
+            CheckBoxReview.Enabled = CheckBoxReview.Visible = false;
+            ButtonCancel.Enabled = ButtonCancel.Visible = true;
+
+            ButtonProcessChanges.Text = "Process Changes";
+
+            GroupBoxSelect.Enabled = false;
+            GroupBoxAction.Enabled = false;
+        }
+
+        private void ProcessChanges(List<(User user, List<(AssignableEntity assignment, bool isAdd)> userChanges)> changes)
+        {
+            ButtonProcessChanges.Enabled = false;
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Processing changes",
+                Work = (worker, args) =>
+                {
+                    var failures = 0;
+                    var results = new Dictionary<User, ProcessingResult>();
+                    SendMessageToStatusBar?.Invoke(this, new StatusBarMessageEventArgs(0));
+
+                    foreach (var (user, result) in xrmContext.ExecuteAssignmentChanges(changes))
                     {
-                        requests.Add(new AddMembersTeamRequest
+                        results.Add(user, result);
+                        SendMessageToStatusBar?.Invoke(this, new StatusBarMessageEventArgs((results.Count * 100) / changes.Count));
+                        if (result == ProcessingResult.Failure || result == ProcessingResult.Partial) failures++;
+                    }
+
+                    ListViewUsers.Invoke(new Action(() =>
+                    {
+                        foreach (var listUser in ListViewUsers.Items.Cast<ListViewItem>())
                         {
-                            TeamId = id,
-                            MemberIds = filteredUsers.Entities.Skip(i).Take(1000).Select(u => u.Id).ToArray()
-                        });
+                            if (listUser.Tag is User user && !user.Disabled && results.TryGetValue(user, out var result) && result != ProcessingResult.NoChange)
+                            {
+                                listUser.ForeColor = result == ProcessingResult.Success ? Color.DarkGreen : result == ProcessingResult.Partial ? Color.Yellow : Color.DarkRed;
+                            }
+                        }
+                    }));
+
+                    args.Result = failures;
+                },
+                PostWorkCallBack = (args) =>
+                {
+                    if (args.Error != null)
+                    {
+                        ShowErrorDialog(args.Error);
+                    }
+                    else if (args.Result is int failures)
+                    {
+                        ToggleEnabled();
+                        MessageBox.Show($"Change processing {(failures == 0 ? "successful" : failures == changes.Count ? "failed" : "partially successful")}.");
                     }
                 }
+            });
+        }
+
+        private void ListViewUsers_RetrieveVirtualItem(object sender, RetrieveVirtualItemEventArgs e)
+        {
+            if (Items.Count > e.ItemIndex)
+            {
+                e.Item = Items[e.ItemIndex];
             }
             else
             {
-                var userRoleLink = userQuery.AddLink("systemuserroles", "systemuserid", "systemuserid", JoinOperator.NotAny);
-                userRoleLink.LinkCriteria.AddCondition("roleid", ConditionOperator.Equal, id);
-                var filteredUsers = Service.RetrieveMultiple(userQuery);
-
-                if (filteredUsers.Entities.Any())
+                var user = xrmContext.GetList<User>()[e.ItemIndex];
+                e.Item = new ListViewItem(user.ListItems)
                 {
-                    for (int i = 0; i < filteredUsers.Entities.Count; i += 1000)
-                    {
-                        requests.Add(new AssociateRequest
-                        {
-                            Target = new EntityReference("role", id),
-                            Relationship = new Relationship("systemuserroles_association"),
-                            RelatedEntities = new EntityReferenceCollection(filteredUsers.Entities.Skip(i).Take(1000).Select(u => u.ToEntityReference()).ToArray())
-                        });
-                    }
-                }
+                    ForeColor = user.Disabled ? Color.Gray : Color.Empty
+                };
             }
-
-            return requests;
         }
 
-        private IEnumerable<OrganizationRequest> CreateRemoveRequest(string entity, Guid id, Guid[] users)
+        private void ListViewUsers_CacheVirtualItems(object sender, CacheVirtualItemsEventArgs e)
         {
-            var requests = new List<OrganizationRequest>();
-            var userQuery = new QueryExpression("systemuser");
-            userQuery.Criteria.AddCondition(new ConditionExpression("systemuserid", ConditionOperator.In, users));
+            if (Items != null && e.EndIndex < Items.Count) return;
 
-            if (entity == "Team")
+            var users = xrmContext.GetList<User>();
+
+            for (int i = Items.Count; i <= e.EndIndex; i++)
             {
-                var teamLink = userQuery.AddLink("teammembership", "systemuserid", "systemuserid", JoinOperator.Any);
-                teamLink.LinkCriteria.AddCondition("teamid", ConditionOperator.Equal, id);
-                var filteredUsers = Service.RetrieveMultiple(userQuery);
-
-                if (filteredUsers.Entities.Any())
+                Items.Add(new ListViewItem(users[i].ListItems)
                 {
-                    for (int i = 0; i < filteredUsers.Entities.Count; i += 1000)
-                    {
-                        requests.Add(new RemoveMembersTeamRequest
-                        {
-                            TeamId = id,
-                            MemberIds = filteredUsers.Entities.Skip(i).Take(1000).Select(u => u.Id).ToArray()
-                        });
-                    }
-                }
+                    ForeColor = users[i].Disabled ? Color.Gray : Color.Empty
+                });
             }
-            else
-            {
-                var userRoleLink = userQuery.AddLink("systemuserroles", "systemuserid", "systemuserid", JoinOperator.Any);
-                userRoleLink.LinkCriteria.AddCondition("roleid", ConditionOperator.Equal, id);
-                var filteredUsers = Service.RetrieveMultiple(userQuery);
-
-                if (filteredUsers.Entities.Any())
-                {
-                    for (int i = 0; i < filteredUsers.Entities.Count; i += 1000)
-                    {
-                        requests.Add(new DisassociateRequest
-                        {
-                            Target = new EntityReference("role", id),
-                            Relationship = new Relationship("systemuserroles_association"),
-                            RelatedEntities = new EntityReferenceCollection(filteredUsers.Entities.Skip(i).Take(1000).Select(u => u.ToEntityReference()).ToArray())
-                        });
-                    }
-                }
-            }
-
-            return requests;
-        }
-
-        private IEnumerable<OrganizationRequest> CreateRemoveRequests(Guid[] users, Guid[] excludedTeamIds)
-        {
-            var membershipQuery = new QueryExpression("teammembership");
-            membershipQuery.ColumnSet.AddColumns("teamid", "systemuserid");
-            membershipQuery.Criteria.AddCondition(new ConditionExpression("systemuserid", ConditionOperator.In, users));
-            membershipQuery.Criteria.AddCondition(new ConditionExpression("teamid", ConditionOperator.NotIn, excludedTeamIds));
-            var teamLink = membershipQuery.AddLink("team", "teamid", "teamid");
-            teamLink.LinkCriteria.AddCondition("isdefault", ConditionOperator.Equal, false);
-            teamLink.LinkCriteria.AddCondition("teamtype", ConditionOperator.Equal, 0);
-
-            var memberships = Service.RetrieveMultiple(membershipQuery);
-
-            return memberships.Entities.GroupBy(m => m.GetAttributeValue<Guid>("teamid"), m => m.GetAttributeValue<Guid>("systemuserid"))
-                .SelectMany(g => CreateRemoveRequest("Team", g.Key, g.ToArray()));
         }
     }
 }

@@ -250,12 +250,27 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="AssignmentChange.cs" />
+    <Compile Include="EntityComboBox.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="EntityListView.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="ListEntity.cs" />
+    <Compile Include="FetchXMLDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="FetchXMLDialog.Designer.cs">
+      <DependentUpon>FetchXMLDialog.cs</DependentUpon>
+    </Compile>
+    <Compile Include="AssignableEntity.cs" />
     <Compile Include="MyPlugin.cs" />
-    <Compile Include="MyPluginControl.cs">
+    <Compile Include="PluginControl.cs">
       <SubType>UserControl</SubType>
     </Compile>
-    <Compile Include="MyPluginControl.designer.cs">
-      <DependentUpon>MyPluginControl.cs</DependentUpon>
+    <Compile Include="PluginControl.designer.cs">
+      <DependentUpon>PluginControl.cs</DependentUpon>
     </Compile>
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Properties\Resources.Designer.cs">
@@ -263,26 +278,35 @@
       <DesignTime>True</DesignTime>
       <DependentUpon>Resources.resx</DependentUpon>
     </Compile>
-    <Compile Include="Settings.cs" />
     <Compile Include="Role.cs" />
+    <Compile Include="Settings.cs" />
     <Compile Include="View.cs" />
     <Compile Include="Team.cs" />
     <Compile Include="User.cs" />
+    <Compile Include="XrmService.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="app.config" />
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
-    <EmbeddedResource Include="MyPluginControl.resx">
-      <DependentUpon>MyPluginControl.cs</DependentUpon>
+    <EmbeddedResource Include="FetchXMLDialog.resx">
+      <DependentUpon>FetchXMLDialog.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="PluginControl.resx">
+      <DependentUpon>PluginControl.cs</DependentUpon>
+      <SubType>Designer</SubType>
     </EmbeddedResource>
     <EmbeddedResource Include="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
+      <SubType>Designer</SubType>
       <LastGenOutput>Resources.Designer.cs</LastGenOutput>
     </EmbeddedResource>
   </ItemGroup>
-  <ItemGroup />
+  <ItemGroup>
+    <Content Include="Resources\Circle-Checked.png" />
+    <Content Include="Resources\Circle-Unchecked.png" />
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
     <PostBuildEvent>IF $(ConfigurationName) == Debug (

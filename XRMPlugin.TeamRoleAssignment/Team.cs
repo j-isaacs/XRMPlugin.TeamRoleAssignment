@@ -1,30 +1,25 @@
 ﻿using System;
 using Microsoft.Xrm.Sdk;
+using Microsoft.Crm.Sdk.Messages;
 
-namespace XRMPlugin.TeamManager
+namespace XRMPlugin.TeamRoleAssignment
 {
-    class Team
+    internal class Team : AssignableEntity
     {
-        private Entity TeamEntity;
+        public Team(Entity entity) : base(entity) { }
 
-        public Guid Id
-        {
-            get { return TeamEntity.Id; }
-        }
+        public override (string linkEntity, string entityId) Details => ("teammembership", "teamid");
 
-        public string Name
+        public override OrganizationRequest CreateAssignRequest(Guid userId) => new AddMembersTeamRequest
         {
-            get { return TeamEntity.GetAttributeValue<string>("name"); }
-        }
+            TeamId = Id,
+            MemberIds = new[] { userId }
+        };
 
-        public Team(Entity teamEntity)
+        public override OrganizationRequest CreateUnassignRequest(Guid userId) => new RemoveMembersTeamRequest
         {
-            TeamEntity = teamEntity;
-        }
-
-        public override string ToString()
-        {
-            return Name;
-        }
+            TeamId = Id,
+            MemberIds = new[] { userId }
+        };
     }
 }

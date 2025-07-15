@@ -1,43 +1,26 @@
-﻿using System;
-using Microsoft.Xrm.Sdk;
+﻿using Microsoft.Xrm.Sdk;
+using System.Collections.Generic;
 
-namespace XRMPlugin.TeamManager
+namespace XRMPlugin.TeamRoleAssignment
 {
-    class User
+    internal class User : ListEntity
     {
-        private Entity UserEntity;
+        public override string Name => 
+            $"{entity.GetAttributeValue<string>("domainname")} — {entity.GetAttributeValue<string>("lastname")}, {entity.GetAttributeValue<string>("firstname")}";
 
-        public Guid Id
+        public override bool Disabled => entity.GetAttributeValue<bool>("isdisabled");
+
+        public override string[] ListItems => new string[]
         {
-            get { return UserEntity.Id; }
-        }
+            entity.GetAttributeValue<string>("domainname"),
+            entity.GetAttributeValue<string>("lastname"),
+            entity.GetAttributeValue<string>("firstname"),
+            entity.GetAttributeValue<EntityReference>("businessunitid")?.Name,
+            Disabled ? "Disabled" : "Enabled"
+        };
 
-        public string UserName
-        {
-            get { return UserEntity.GetAttributeValue<string>("domainname"); }
-        }
+        public List<AssignmentChange> AssignmentChanges { get; set; }
 
-        public string FirstName
-        {
-            get { return UserEntity.GetAttributeValue<string>("firstname"); }
-        }
-
-        public string LastName
-        {
-            get { return UserEntity.GetAttributeValue<string>("lastname"); }
-        }
-
-        public bool Disabled
-        {
-            get { return UserEntity.GetAttributeValue<bool>("isdisabled"); }
-        }
-
-        public string Status { get; set; }
-
-        public User(Entity userEntity)
-        {
-            UserEntity = userEntity;
-            Status = Disabled ? "Disabled" : "Enabled";
-        }
+        public User(Entity entity) : base(entity) { }
     }
 }
